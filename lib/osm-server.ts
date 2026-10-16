@@ -11,6 +11,10 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 interface RetryOptions {
   retries?: number;
   baseDelayMs?: number;
+  /** Per-attempt timeout. A hung upstream is aborted instead of waiting forever. */
+  timeoutMs?: number;
+  /** Absolute deadline (Date.now() ms). No new attempt/backoff starts past it. */
+  deadline?: number;
 }
 
 /**
@@ -21,11 +25,17 @@ interface RetryOptions {
 export async function fetchWithRetry(
   url: string,
   init: RequestInit,
-  { retries = 3, baseDelayMs = 1000 }: RetryOptions = {}
+  { retries = 3, baseDelayMs = 1000, timeoutMs = 15000, deadline }: RetryOptions = {}
 ): Promise<Response> {
   let lastRes: Response | undefined;
   for (let attempt = 0; attempt <= retries; attempt++) {
-    const res = await fetch(url, init);
+    const remaining = deadline ? deadline - Date.now() : timeoutMs;
+    if (remaining <= 0) break;
+    // Throws (AbortError/TimeoutError) if the upstream doesn't answer in time.
+    const res = await fetch(url, {
+      ...init,
+      signal: AbortSignal.timeout(Math.min(timeoutMs, remaining)),
+    });
     if (res.status !== 429 && res.status !== 503 && res.status !== 504) {
       return res;
     }
@@ -36,9 +46,11 @@ export async function fetchWithRetry(
       Number.isFinite(retryAfter) && retryAfter > 0
         ? retryAfter * 1000
         : baseDelayMs * 2 ** attempt;
+    if (deadline && Date.now() + delay >= deadline) break;
     await sleep(delay);
   }
-  return lastRes!;
+  if (!lastRes) throw new Error(`deadline exceeded: ${url}`);
+  return lastRes;
 }
 
 /** Bounded time-to-live cache. Evicts the oldest entry when full. */
