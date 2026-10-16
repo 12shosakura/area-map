@@ -3,7 +3,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { Facility, FacilityCategory } from "@/types";
 import { CATEGORY_COLORS, CATEGORY_EMOJI, CATEGORY_LABELS } from "@/types";
-import { fetchOverpassFacilities, reverseGeocode } from "@/lib/overpass";
+import {
+  fetchOverpassFacilities,
+  overpassErrorMessage,
+  reverseGeocode,
+} from "@/lib/overpass";
 import { listFacilities, getFacility } from "@/lib/db";
 import FacilityPanel from "./FacilityPanel";
 import AddFacilityModal from "./AddFacilityModal";
@@ -76,6 +80,10 @@ export default function MapView() {
   const [selected, setSelected] = useState<Facility | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [fetchError, setFetchError] = useState("");
+  const [tooWide, setTooWide] = useState(false);
+  // In-flight Overpass request; aborted when the map moves again.
+  const inflightRef = useRef<AbortController | null>(null);
 
   // keep refs in sync with state
   useEffect(() => { activeCategoriesRef.current = activeCategories; }, [activeCategories]);
@@ -153,20 +161,40 @@ export default function MapView() {
     const north = bounds.getNorth();
     const east = bounds.getEast();
 
-    if (north - south > 1 || east - west > 1) return; // too wide
+    // Cancel the previous (now stale) request so pans don't pile up requests.
+    inflightRef.current?.abort();
 
+    if (north - south > 1 || east - west > 1) {
+      inflightRef.current = null;
+      setTooWide(true);
+      setLoading(false);
+      return;
+    }
+    setTooWide(false);
+
+    const ctrl = new AbortController();
+    inflightRef.current = ctrl;
     setLoading(true);
+    setFetchError("");
     try {
-      const facilities = await fetchOverpassFacilities([south, west, north, east]);
+      const facilities = await fetchOverpassFacilities(
+        [south, west, north, east],
+        ctrl.signal
+      );
       facilities.forEach((f) => {
         allOsmRef.current.set(f.id, f);
         addMarker(f);
       });
       manualFacilitiesRef.current.forEach((f) => addMarker(f));
     } catch (e) {
+      if (ctrl.signal.aborted) return; // superseded by a newer request
       console.error("Overpass fetch failed", e);
+      setFetchError(overpassErrorMessage(e));
     } finally {
-      setLoading(false);
+      if (inflightRef.current === ctrl) {
+        inflightRef.current = null;
+        setLoading(false);
+      }
     }
   }
 
@@ -206,15 +234,15 @@ export default function MapView() {
         }
       } catch { /* ignore */ }
       const map = L.map(mapContainerRef.current!).setView([centerLat, centerLng], zoom);
-      L.tileLayer(
-        "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
-        {
-          attribution:
-            '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors © <a href="https://carto.com/">CARTO</a>',
-          subdomains: "abcd",
-          maxZoom: 20,
-        }
-      ).addTo(map);
+      // 背景地図: 国土地理院「淡色地図」（無料・APIキー不要）。
+      // 以前の CARTO basemaps は APIキー必須になり「API KEY REQUIRED」画像しか返さなくなった。
+      L.tileLayer("https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png", {
+        attribution:
+          '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank">国土地理院</a> | 施設データ © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        minZoom: 5,
+        maxNativeZoom: 18,
+        maxZoom: 20,
+      }).addTo(map);
 
       mapRef.current = map;
 
@@ -228,6 +256,7 @@ export default function MapView() {
 
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
+      inflightRef.current?.abort();
       mapRef.current?.remove();
       mapRef.current = null;
       markersRef.current.clear();
@@ -310,6 +339,24 @@ export default function MapView() {
       {loading && (
         <div className="absolute top-3 right-3 z-[1000] bg-white rounded-full shadow px-3 py-1 text-xs text-gray-500">
           読み込み中…
+        </div>
+      )}
+
+      {/* Too wide / error */}
+      {!loading && tooWide && (
+        <div className="absolute top-3 right-3 z-[1000] bg-white rounded-full shadow px-3 py-1 text-xs text-gray-600">
+          範囲が広すぎます。ズームインすると施設を表示します
+        </div>
+      )}
+      {!loading && !tooWide && fetchError && (
+        <div className="absolute top-3 right-3 z-[1000] max-w-xs bg-red-50 border border-red-200 rounded-lg shadow px-3 py-2 text-xs text-red-700 space-y-1">
+          <p>{fetchError}</p>
+          <button
+            onClick={() => fetchAndRender()}
+            className="font-medium underline"
+          >
+            再試行
+          </button>
         </div>
       )}
 
