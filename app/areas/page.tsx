@@ -3,6 +3,7 @@
 import { useState, useRef } from "react";
 import {
   fetchOverpassFacilities,
+  overpassErrorMessage,
   searchPlaces,
   AREA_SCORE_WEIGHTS,
   type PlaceSearchResult,
@@ -128,10 +129,7 @@ export default function AreasPage() {
       setScores(cells.sort((a, b) => b.score - a.score));
     } catch (e) {
       console.error(e);
-      setError(
-        "データ取得に失敗しました。しばらく待ってから再試行してください。" +
-        "（Overpass APIの一時的な混雑が原因の場合があります）"
-      );
+      setError(overpassErrorMessage(e));
     } finally {
       setLoading(false);
     }
