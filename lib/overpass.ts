@@ -82,18 +82,33 @@ export function osmElementToFacility(el: OsmElement): Facility | null {
   };
 }
 
+/** Thrown when /api/overpass fails; `status` lets the UI pick a message. */
+export class OverpassError extends Error {
+  constructor(public status: number) {
+    super(`Overpass API error: ${status}`);
+    this.name = "OverpassError";
+  }
+}
+
+// Slightly longer than the server's total budget (40s) so the server can
+// answer with a proper error before the browser gives up.
+const CLIENT_TIMEOUT_MS = 50_000;
+
 export async function fetchOverpassFacilities(
-  bbox: [number, number, number, number]
+  bbox: [number, number, number, number],
+  signal?: AbortSignal
 ): Promise<Facility[]> {
   // Goes through our server-side proxy (/api/overpass), which adds caching,
-  // retry/backoff and mirror rotation to avoid Overpass 429s.
+  // retry/backoff, timeouts and mirror rotation to avoid Overpass 429s.
+  const timeout = AbortSignal.timeout(CLIENT_TIMEOUT_MS);
   const res = await fetch("/api/overpass", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ bbox }),
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
 
-  if (!res.ok) throw new Error(`Overpass API error: ${res.status}`);
+  if (!res.ok) throw new OverpassError(res.status);
 
   const json = await res.json();
   const elements: OsmElement[] = json.elements || [];
@@ -123,4 +138,18 @@ export async function searchPlaces(query: string): Promise<PlaceSearchResult[]> 
   if (!res.ok) return [];
   const data = (await res.json()) as PlaceSearchResult[];
   return Array.isArray(data) ? data.filter((d) => d.boundingbox) : [];
+}
+
+/** User-facing (Japanese) message for a failed Overpass fetch. */
+export function overpassErrorMessage(e: unknown): string {
+  if (e instanceof OverpassError && e.status === 429) {
+    return "地図データのサーバーが混雑しています。少し時間をおいて再試行してください。";
+  }
+  if (
+    (e instanceof OverpassError && e.status === 504) ||
+    (e as Error)?.name === "TimeoutError"
+  ) {
+    return "地図データの取得がタイムアウトしました。範囲を狭めるか、再試行してください。";
+  }
+  return "地図データの取得に失敗しました。再試行してください。";
 }
